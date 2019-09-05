@@ -1,0 +1,52 @@
+/*
+ * Start Bootstrap - Full (http://startbootstrap.com/)
+ * Copyright 2013-2016 Start Bootstrap
+ * Licensed under MIT (https://github.com/BlackrockDigital/startbootstrap/blob/gh-pages/LICENSE)
+ */
+
+body {
+    margin-top: 50px; /* Required margin for .navbar-fixed-top. Remove if using .navbar-static-top. Change if height of navigation changes. */
+    /* background: url('../images/20th-century-brown-vintage-paper-1.jpg') no-repeat center center fixed; */
+    -webkit-background-size: cover;
+    -moz-background-size: cover;
+    background-size: cover;
+    -o-background-size: cover;
+}
+
+.svg-container {
+    display: inline-block;
+    position: relative;
+    width: 100%;
+    padding-bottom: 100%; /* aspect ratio */
+    vertical-align: top;
+    overflow: hidden;
+}
+.svg-content-responsive {
+    display: inline-block;
+    position: absolute;
+    top: 0;
+    left: 0;
+}
+
+.edgelabel {
+    text-transform: uppercase;
+    font-size: 10px;
+}
+
+.nodelabel {
+    /* text-shadow: 1px 1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, -1px -1px 0 #fff; */
+}
+
+svg circle {
+    stroke: #eee;
+    stroke-width: 1.5px;
+    cursor: move;
+}
+
+.bg-credit {
+    position: absolute;
+    bottom: 0.2em;
+    left: 0.5em;
+    font-size: smaller;
+    opacity: 0.5;
+}
