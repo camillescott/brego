@@ -12,12 +12,16 @@ import datetime
 import json
 import os
 import glob
+import signal
 import sys
 import time
 
 import curio
+from curio.socket import *
 
-from utils import notifies
+from .database import SensorDB
+from .utils import notifies, now
+from .ws_server import serve_ws
 
 
 def find_onewire_devices():
@@ -67,81 +71,152 @@ class AsyncMultiSensor:
             future = self.executor.submit(notifies(self.notifier)(device.read))
             futures[future] = device.device_name
 
-        result = {'time': str(datetime.datetime.now())}
+        results = []
         for reading in concurrent.futures.as_completed(futures):
-            result[futures[reading]] = reading.result()
+            item = (futures[reading], {'time': now(), 'value': reading.result()})
+            results.append(item)
 
-        return result
-
-    
-    def read_as_dataframe(self, *args):
-        return pd.DataFrame(self.read(), index=pd.DatetimeIndex([datetime.datetime.now()])).sort_index(axis=1)
+        return results
 
 
+class SensorServer:
 
-async def temperature_scraper(multisensor, readings, lock):
-    print('Start scraping temperature sensors.')
-    try:
-        while True:
-            _temps = await curio.run_in_thread(multisensor.read)
-            temps = {k:[v] for k,v in _temps.items()}
-            async with lock:
-                readings.append(temps)
-    except curio.CancelledError:
-        raise
-
-
-async def csv_interval_writer(readings, fp, lock, interval=0.05):
-    try:
-        prev = None
-        curr = None
-
-        while True:
-            await curio.sleep(interval)
-            async with lock:
-                if prev is None and len(readings) == 0:
-                    continue
-
-                curr = dict(readings[-1])
-                if prev == curr:
-                    curr['time'] = [str(datetime.datetime.now())]
-                else:
-                    prev = dict(readings[-1])
-
-            print(json.dumps(curr), file=fp)
-
-    except curio.CancelledError:
-        raise
-
-            
-class TemperatureServer:
-
-    def __init__(self, multisensor, output_filename):
-        self.readings = []
+    def __init__(self, multisensor, adc, sensor_db, bcast_host='', bcast_port=5454,
+                       websocket_host='', websocket_port=6565):
+        self.readings = curio.Queue()
         self.multisensor = multisensor
-        self.output_filename = output_filename
+        self.adc = adc
+        self.sensor_db = sensor_db
+        self.subscribers = set()
+
+        self.bcast_host = bcast_host
+        self.bcast_port = bcast_port
+
+        self.websocket_host = websocket_host
+        self.websocket_port = websocket_port
+
+        self.scrapers = {}
+
+    async def adc_scraper(self, adc, readings, interval=.1):
+        print('Start scraping ADC.', file=sys.stderr)
+        try:
+            while True:
+                await self.readings.put(('MCP3008-0', {'time': now(), 'value': adc.value}))
+                await curio.sleep(interval)
+        except:
+            raise
+
+    async def temperature_scraper(self, multisensor, readings):
+        print('Start scraping temperature sensors.', file=sys.stderr)
+        try:
+            while True:
+                temps = await curio.run_in_thread(multisensor.read)
+                for temp in temps:
+                    await self.readings.put(temp)
+        except curio.CancelledError:
+            raise
+
+    async def dispatcher(self):
+        try:
+            async for reading in self.readings:
+                for q in list(self.subscribers):
+                    await q.put(reading)
+        except curio.CancelledError:
+            raise
+
+    async def database_writer(self, readings, db, buf_size=10):
+        try:
+            write_q = curio.Queue()
+            self.subscribers.add(write_q)
+
+            while True:
+                device, data = await write_q.get()
+
+                db.insert_readings(device, [data])
+                await write_q.task_done()
+
+        except curio.CancelledError:
+            raise
+
+    async def broadcast_client(self, client, addr):
+        print('Broadcast connection from', addr, file=sys.stderr)
+
+        stream = client.as_stream()
+        bcast_q = curio.Queue()
+        self.subscribers.add(bcast_q)
+
+        try:
+            while True:
+                device, data = await bcast_q.get()
+                string = json.dumps({'device': device,
+                                      'data': data}) + '\n'
+                await stream.write(string.encode('ascii'))
+        except curio.CancelledError:
+            await stream.write({'msg': 'END_STREAM'})
+            raise
+        except BrokenPipeError:
+            print('{0} closed connection.'.format(addr))
+
+    async def broadcaster(self, host, port):
+        async with curio.SignalQueue(signal.SIGHUP) as restart:
+            while True:
+                print('Starting broadcast server.', file=sys.stderr)
+                broadcast_task = await curio.spawn(curio.tcp_server, host, port, self.broadcast_client)
+                await restart.get()
+                await broadcast_task.cancel()
+
+    async def websocket_client(self, in_q, out_q):
+        #print('Broadcast websocket connection from', addr, file=sys.stderr)
+
+        bcast_q = curio.Queue()
+        self.subscribers.add(bcast_q)
+
+        try:
+            while True:
+                if not in_q.empty():
+                    msg = await in_q.get()
+                    if msg is None:
+                        break
+
+                device, data = await bcast_q.get()
+                strdata = json.dumps({'device': device,
+                                      'data': data}) + '\n'
+                await out_q.put(strdata)
+        except curio.CancelledError:
+            raise
 
     async def run(self):
-        lock = curio.Lock()
-        with open(self.output_filename, 'w', buffering=1) as fp:
-            #writer = csv.DictWriter(fp,
-            #                        fieldnames=self.multisensor.device_names + ['time'])
-            #writer.writeheader()
-            async with curio.TaskGroup() as g:
-                await g.spawn(temperature_scraper,
-                              self.multisensor,
-                              self.readings,
-                              lock)
-                await g.spawn(csv_interval_writer,
-                              self.readings,
-                              fp,
-                              lock)
+        async with curio.TaskGroup() as g:
+            cancel = curio.SignalEvent(signal.SIGINT, signal.SIGTERM)
 
-if __name__ == '__main__':
-    devices = [DS18B20Sensor(fn) for fn in find_onewire_devices()]
-    if not devices:
-        print('No devices found, exiting.', file=sys.stderr)
-        sys.exit()
-    sensors = AsyncMultiSensor(devices)
-    server = TemperatureServer(sensors, 'output.csv')
-    curio.run(server.run, with_monitor=True)
+            dispatcher_task  = await g.spawn(self.dispatcher)
+            scraper_task     = await g.spawn(self.temperature_scraper,
+                                             self.multisensor,
+                                             self.readings)
+            adc_task         = await g.spawn(self.adc_scraper,
+                                             self.adc,
+                                             self.readings)
+            database_task    = await g.spawn(self.database_writer,
+                                             self.readings,
+                                             self.sensor_db)
+            #broadcaster_task = await g.spawn(self.broadcaster,
+            #                                 self.bcast_host,
+            #                                 self.bcast_port)
+            websocket_task   = await g.spawn(curio.tcp_server,
+                                             self.websocket_host,
+                                             self.websocket_port,
+                                             serve_ws(self.websocket_client))
+
+            await cancel.wait()
+            del cancel
+
+            print('Shutting down server...', file=sys.stderr)
+            await scraper_task.cancel()
+            await adc_task.cancel()
+            await dispatcher_task.cancel()
+            await database_task.cancel()
+            #await broadcaster_task.cancel()
+            await websocket_task.cancel()
+
+        self.sensor_db.end_session()
+

@@ -6,6 +6,9 @@
 # Author : Camille Scott <camille.scott.w@gmail.com>
 # Date   : 02.09.2019
 
+import datetime
+import time
+
 
 def notifies(notifier):
     def notify_wrapper(func):
@@ -18,3 +21,8 @@ def notifies(notifier):
             return result
         return _wrapped
     return notify_wrapper
+
+
+def now():
+    return time.time()
+    #return datetime.datetime.now().isoformat()
