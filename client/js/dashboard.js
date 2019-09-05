@@ -1,8 +1,8 @@
-const socket = new WebSocket('ws://192.168.1.54:6565');
+const socket = new WebSocket('ws://10.241.147.135:6565');
 
 // Connection opened
 socket.addEventListener('open', function(event) {
-    socket.send("1A37F239BC1");
+    socket.send("");
 });
 
 socket.onmessage = function(event) {
