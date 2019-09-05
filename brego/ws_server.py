@@ -48,11 +48,41 @@ from wsproto.events import (AcceptConnection, CloseConnection,
 DATA_TYPES = (TextMessage, BytesMessage)
 
 
+async def process_incoming(wsconn, in_q, client):
+    rsp = b''
+    for event in wsconn.events():
+        if isinstance(event, (TextMessage, BytesMessage)):
+            await in_q.put(event.data)
+        elif isinstance(event, Request):
+            # Auto accept. Maybe consult the handler?
+            rsp += wsconn.send(AcceptConnection())
+            print('Accepted WebSocket connection from {0}.'.format(client.getpeername()),
+                  file=sys.stderr)
+        elif isinstance(event, CloseConnection):
+            # The client has closed the connection.
+            print('{0} closed WebSocket connection.'.format(client.getpeername()),
+                  file=sys.stderr)
+            await in_q.put(None)
+            closed = True
+        elif isinstance(event, Ping):
+            rsp += wsconn.send(event.response())
+        else:
+            print('Unhandled event: {!r}'.format(event), file=sys.stderr)
+    return rsp
+
+
 async def ws_adapter(in_q, out_q, client, _):
     """A simple, queue-based Curio-Sans-IO websocket bridge."""
     client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
     wsconn = WSConnection(ConnectionType.SERVER)
     closed = False
+
+
+    # need to accept the request first
+    auth = await client.recv(65535)
+    wsconn.receive_data(auth)
+    rsp = await process_incoming(wsconn, in_q, client)
+    await client.sendall(rsp)
 
     while not closed:
         wstask = await spawn(client.recv, 65535)
@@ -65,26 +95,8 @@ async def ws_adapter(in_q, out_q, client, _):
 
         if task is wstask:
             wsconn.receive_data(result)
-            rsp = b''
+            rsp = await process_incoming(wsconn, in_q, client)
 
-            for event in wsconn.events():
-                if isinstance(event, (TextMessage, BytesMessage)):
-                    await in_q.put(event.data)
-                elif isinstance(event, Request):
-                    # Auto accept. Maybe consult the handler?
-                    rsp += wsconn.send(AcceptConnection())
-                    print('Accepted WebSocket connection from {0}.'.format(client.getpeername()),
-                          file=sys.stderr)
-                elif isinstance(event, CloseConnection):
-                    # The client has closed the connection.
-                    print('{0} closed WebSocket connection.'.format(client.getpeername()),
-                          file=sys.stderr)
-                    await in_q.put(None)
-                    closed = True
-                elif isinstance(event, Ping):
-                    rsp += wsconn.send(event.response())
-                else:
-                    print('Unhandled event: {!r}'.format(event), file=sys.stderr)
             await client.sendall(rsp)
         else:
             # We got something from the out queue.
