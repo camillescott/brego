@@ -12,21 +12,26 @@ import curio
 from gpiozero import MCP3008
 
 from brego.database import SensorDB
+from brego.reporters import (adc_reporter, multionewire_reporter)
 from brego.sensors import (find_onewire_devices,
-                           AsyncMultiSensor,
-                           DS18B20Sensor,
-                           SensorServer)
+                           MultiOneWireSensor,
+                           DS18B20Sensor)
+from brego.server import SensorServer
 
 if __name__ == '__main__':
-    devices = [DS18B20Sensor(fn) for fn in find_onewire_devices()]
-    if not devices:
-        print('No devices found, exiting.', file=sys.stderr)
-        sys.exit()
-    sensors = AsyncMultiSensor(devices)
     database = SensorDB.request_instance()
-    for device in devices:
+    server = SensorServer(database)
+
+    # one-wire temperature senseoers
+    onewire_devices = [DS18B20Sensor(fn) for fn in find_onewire_devices()]
+    onewire_sensors = MultiOneWireSensor(onewire_devices)
+    for device in onewire_devices:
         database.add_device(device.device_name, 'temperature')
+    server.register_reporter(multionewire_reporter(onewire_sensors))
+
+    # ADCs
     adc = MCP3008()
     database.add_device('MCP3008-0', 'ADC')
-    server = SensorServer(sensors, adc, database)
+    server.register_reporter(adc_reporter(adc, 'MCP3008-0'))
+
     curio.run(server.run, with_monitor=True)
