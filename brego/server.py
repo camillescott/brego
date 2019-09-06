@@ -15,7 +15,7 @@ import json
 import os
 import signal
 import sys
-from typing import Awaitable, Optional, Callable
+from typing import Awaitable, Optional, Callable, Tuple
 
 import curio
 from curio.socket import *
@@ -24,6 +24,7 @@ from .database import SensorDB
 from .utils import notifies, now
 from .ws_server import serve_ws
 
+# Type definition for sensor-reporter coroutines
 ReporterType = Callable[[curio.Queue, float], Awaitable[None]]
 
 class SensorServer:
@@ -39,6 +40,8 @@ class SensorServer:
 
         Args:
             sensor_db (SensorDB): Database to write to.
+            polling_interval (float): Global sensor min polling interval.
+            database_write_interval (float): Data write op min interval.
             bcast_host (str): Host address for TCP broadcast; if None, don't broadcast.
             bcast_port (int): Host port for TCP broadcast.
             websocket_host (str): Host address for websocket broadcast; if None, don't broadcast.
@@ -82,7 +85,7 @@ class SensorServer:
         except curio.CancelledError:
             raise
 
-    async def database_writer(self, readings, db, buf_size=10):
+    async def database_writer(self) -> None:
         try:
             write_q = curio.Queue()
             self.subscribers.add(write_q)
@@ -90,13 +93,13 @@ class SensorServer:
             while True:
                 device, data = await write_q.get()
 
-                db.insert_readings(device, [data])
+                self.sensor_db.insert_readings(device, [data])
                 await write_q.task_done()
 
         except curio.CancelledError:
             raise
 
-    async def broadcast_client(self, client, addr):
+    async def broadcast_client(self, client: curio.io.Socket, addr: Tuple[str, int]) -> None:
         print('Broadcast connection from', addr, file=sys.stderr)
 
         stream = client.as_stream()
@@ -115,7 +118,7 @@ class SensorServer:
         except BrokenPipeError:
             print('{0} closed connection.'.format(addr))
 
-    async def broadcaster(self, host, port):
+    async def broadcaster(self, host: str, port: int) -> None:
         async with curio.SignalQueue(signal.SIGHUP) as restart:
             while True:
                 print('Starting broadcast server.', file=sys.stderr)
@@ -123,9 +126,7 @@ class SensorServer:
                 await restart.get()
                 await broadcast_task.cancel()
 
-    async def websocket_client(self, in_q, out_q):
-        #print('Broadcast websocket connection from', addr, file=sys.stderr)
-
+    async def websocket_client(self, in_q: curio.Queue, out_q: curio.Queue) -> None:
         bcast_q = curio.Queue()
         self.subscribers.add(bcast_q)
 
@@ -143,14 +144,12 @@ class SensorServer:
         except curio.CancelledError:
             raise
 
-    async def run(self):
+    async def run(self) -> None:
         async with curio.TaskGroup() as g:
             cancel = curio.SignalEvent(signal.SIGINT, signal.SIGTERM)
 
             await g.spawn(self.dispatcher)
-            await g.spawn(self.database_writer,
-                           self.readings,
-                           self.sensor_db)
+            await g.spawn(self.database_writer)
             if self.bcast_host is not None:
                 await g.spawn(self.broadcaster,
                               self.bcast_host,
