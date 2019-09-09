@@ -1,0 +1,10 @@
+*.swp
+*.swo
+
+.ipynb_checkpoints/
+__pycache__
+*/__pycache__
+
+*.csv
+data/
+venv/
