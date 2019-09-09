@@ -6,32 +6,35 @@
 # Author : Camille Scott <camille.scott.w@gmail.com>
 # Date   : 03.09.2019
 
-import sys
+import argparse
 
-import curio
-from gpiozero import MCP3008
+from brego import http
+from brego import server
 
-from brego.database import SensorDB
-from brego.reporters import (adc_reporter, multionewire_reporter)
-from brego.sensors import (find_onewire_devices,
-                           MultiOneWireSensor,
-                           DS18B20Sensor)
-from brego.server import SensorServer
+
+DEFAULT_SOCKET = '/tmp/brego.sock'
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.set_defaults(func=lambda args: parser.print_help())
+    subparsers = parser.add_subparsers(title='commands')
+
+    sensors_subparser = subparsers.add_parser('sensors')
+    sensors_subparser.set_defaults(func=server.run)
+    sensors_subparser.add_argument('--broadcast-socket', default=DEFAULT_SOCKET)
+    sensors_subparser.add_argument('--websocket-host', default='')
+    sensors_subparser.add_argument('--websocket-port', default=6565)
+
+    http_subparser = subparsers.add_parser('http')
+    http_subparser.set_defaults(func=http.run)
+    http_subparser.add_argument('--sensors-socket', default=DEFAULT_SOCKET)
+    http_subparser.add_argument('--host', default='127.0.0.1')
+    http_subparser.add_argument('-port', default=8080)
+    
+    args = parser.parse_args()
+    args.func(args)
+
 
 if __name__ == '__main__':
-    database = SensorDB.request_instance()
-    server = SensorServer(database)
-
-    # one-wire temperature senseoers
-    onewire_devices = [DS18B20Sensor(fn) for fn in find_onewire_devices()]
-    onewire_sensors = MultiOneWireSensor(onewire_devices)
-    for device in onewire_devices:
-        database.add_device(device.device_name, 'temperature')
-    server.register_reporter(multionewire_reporter(onewire_sensors))
-
-    # ADCs
-    adc = MCP3008()
-    database.add_device('MCP3008-0', 'ADC')
-    server.register_reporter(adc_reporter(adc, 'MCP3008-0'))
-
-    curio.run(server.run, with_monitor=True)
+    main()

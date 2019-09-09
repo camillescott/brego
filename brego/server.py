@@ -30,10 +30,9 @@ ReporterType = Callable[[curio.Queue, float], Awaitable[None]]
 class SensorServer:
 
     def __init__(self, sensor_db: SensorDB,
-                       polling_interval: float = 0.05,
+                       polling_interval: float = 0.01,
                        database_write_interval: float = 0.5,
-                       bcast_host: Optional[str] = None,
-                       bcast_port: int = 5454,
+                       broadcast_socket: Optional[str] = '/tmp/brego.sock',
                        websocket_host: Optional[str] = '',
                        websocket_port: int = 6565):
         """
@@ -42,13 +41,17 @@ class SensorServer:
             sensor_db (SensorDB): Database to write to.
             polling_interval (float): Global sensor min polling interval.
             database_write_interval (float): Data write op min interval.
-            bcast_host (str): Host address for TCP broadcast; if None, don't broadcast.
-            bcast_port (int): Host port for TCP broadcast.
             websocket_host (str): Host address for websocket broadcast; if None, don't broadcast.
             websocket_port (int): Host port for websocket broadcast.
 
         Returns:
         """
+
+        try:
+            os.unlink(broadcast_socket)
+        except OSError:
+            if os.path.exists(broadcast_socket):
+                raise
 
         self.readings = curio.Queue()
         self.sensor_db = sensor_db
@@ -56,9 +59,7 @@ class SensorServer:
         self.polling_interval = polling_interval
         self.database_write_interval = database_write_interval
 
-        self.bcast_host = bcast_host
-        self.bcast_port = bcast_port
-
+        self.broadcast_socket = broadcast_socket
         self.websocket_host = websocket_host
         self.websocket_port = websocket_port
 
@@ -100,7 +101,7 @@ class SensorServer:
             raise
 
     async def broadcast_client(self, client: curio.io.Socket, addr: Tuple[str, int]) -> None:
-        print('Broadcast connection from', addr, file=sys.stderr)
+        print('Unix socket connection from', client.getpeername(), file=sys.stderr)
 
         stream = client.as_stream()
         bcast_q = curio.Queue()
@@ -113,16 +114,16 @@ class SensorServer:
                                       'data': data}) + '\n'
                 await stream.write(string.encode('ascii'))
         except curio.CancelledError:
-            await stream.write({'msg': 'END_STREAM'})
+            await stream.write(json.dumps({'msg': 'END_STREAM'}).encode('ascii'))
             raise
         except BrokenPipeError:
-            print('{0} closed connection.'.format(addr))
+            print(f'{client.getpeername()} closed connection.', file=sys.stderr)
 
-    async def broadcaster(self, host: str, port: int) -> None:
+    async def broadcaster(self) -> None:
         async with curio.SignalQueue(signal.SIGHUP) as restart:
             while True:
                 print('Starting broadcast server.', file=sys.stderr)
-                broadcast_task = await curio.spawn(curio.tcp_server, host, port, self.broadcast_client)
+                broadcast_task = await curio.spawn(curio.unix_server, self.broadcast_socket, self.broadcast_client)
                 await restart.get()
                 await broadcast_task.cancel()
 
@@ -150,10 +151,8 @@ class SensorServer:
 
             await g.spawn(self.dispatcher)
             await g.spawn(self.database_writer)
-            if self.bcast_host is not None:
-                await g.spawn(self.broadcaster,
-                              self.bcast_host,
-                              self.bcast_port)
+            if self.broadcast_socket is not None:
+                await g.spawn(self.broadcaster)
             if self.websocket_host is not None:
                 await g.spawn(curio.tcp_server,
                               self.websocket_host,
@@ -172,3 +171,32 @@ class SensorServer:
 
         self.sensor_db.end_session()
 
+
+def run(args):
+    from gpiozero import MCP3008
+
+    from brego.database import SensorDB
+    from brego.reporters import (adc_reporter, multionewire_reporter)
+    from brego.sensors import (find_onewire_devices,
+                               MultiOneWireSensor,
+                               DS18B20Sensor)
+
+    database = SensorDB.request_instance()
+    server = SensorServer(database,
+                          broadcast_socket=args.broadcast_socket,
+                          websocket_host=args.websocket_host,
+                          websocket_port=args.websocket_port)
+    
+    # one-wire temperature senseoers
+    onewire_devices = [DS18B20Sensor(fn) for fn in find_onewire_devices()]
+    onewire_sensors = MultiOneWireSensor(onewire_devices)
+    for device in onewire_devices:
+        database.add_device(device.device_name, 'temperature')
+    server.register_reporter(multionewire_reporter(onewire_sensors))
+
+    # ADCs
+    adc = MCP3008()
+    database.add_device('MCP3008-0', 'ADC')
+    server.register_reporter(adc_reporter(adc, 'MCP3008-0'))
+
+    curio.run(server.run, with_monitor=True)

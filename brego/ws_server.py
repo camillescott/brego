@@ -87,19 +87,28 @@ async def ws_adapter(in_q: curio.Queue,
 
 
     # need to accept the request first
-    auth = await client.recv(65535)
+    try:
+        auth = await client.recv(65535)
+    except ConnectionResetError:
+        # connection dropped
+        print('Connection to {0} reset.'.format(client), file=sys.stderr)
+        return
     wsconn.receive_data(auth)
     closed, rsp = await process_incoming(wsconn, in_q, client)
     await client.sendall(rsp)
 
     while not closed:
-        wstask = await spawn(client.recv, 65535)
-        outqtask = await spawn(out_q.get)
+        try:
+            wstask = await spawn(client.recv, 65535)
+            outqtask = await spawn(out_q.get)
 
-        async with TaskGroup([wstask, outqtask]) as g:
-            task = await g.next_done()
-            result = await task.join()
-            await g.cancel_remaining()
+            async with TaskGroup([wstask, outqtask]) as g:
+                task = await g.next_done()
+                result = await task.join()
+                await g.cancel_remaining()
+        except ConnectionResetError:
+            print('Connection to {0} reset.'.format(client), file=sys.stderr)
+            return
 
         if task is wstask:
             wsconn.receive_data(result)
