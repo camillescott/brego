@@ -56,7 +56,7 @@ class OneWire(metaclass=ABCMeta):
 class DS18B20Sensor(OneWire):
     """Reads the DS18B20 temperature sensor on the one-wire protocol.
     This sensor takes ~750ms to respond, so it's best to offload
-    the reading two a new thread (see the AsyncMultiSensor class).
+    the reading to a new thread (see the AsyncMultiSensor class).
     """
     def __init__(self, *args, **kwargs) -> None:
         super(DS18B20Sensor, self).__init__(*args, **kwargs)
@@ -83,7 +83,7 @@ class DS18B20Sensor(OneWire):
 class MultiOneWireSensor:
     """Manages multiple (high-latency) one-wire sensors.
     Uses a thread pool to read each sensor simultaenously, which
-    is necessary for high-latency devices like the DS18B20.
+    is necessary for devices like the DS18B20.
 
     Notifier should define `on()` and `off()` methods.
     """

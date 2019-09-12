@@ -17,10 +17,10 @@ from .utils import now
 
 
 def adc_reporter(adc: gpiozero.AnalogInputDevice,
-                 device_name: str) -> ReporterType:
+                 device_name: str,
+                 polling_interval: float) -> ReporterType:
 
-    async def _reporter(readings: curio.Queue,
-                        polling_interval: float):
+    async def _reporter(readings: curio.Queue):
         print('Start polling ADC {0}'.format(adc), file=sys.stderr)
         try:
             while True:
@@ -35,10 +35,10 @@ def adc_reporter(adc: gpiozero.AnalogInputDevice,
     return _reporter
 
 
-def multionewire_reporter(multisensor: MultiOneWireSensor) -> ReporterType:
+def multionewire_reporter(multisensor: MultiOneWireSensor,
+                          polling_interval: float) -> ReporterType:
 
-    async def _reporter(readings: curio.Queue,
-                        polling_interval: float):
+    async def _reporter(readings: curio.Queue):
         print('Start scraping one-wire sensors.', file=sys.stderr)
         try:
             while True:
@@ -50,3 +50,4 @@ def multionewire_reporter(multisensor: MultiOneWireSensor) -> ReporterType:
             raise
 
     return _reporter
+

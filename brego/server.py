@@ -8,7 +8,7 @@
 
 '''The core sensor server. This handles sensor reporting
 and timing and makes the collected data available over
-TCP and WebSocket protocols.
+UNIX socket and WebSocket protocols.
 '''
 
 import json
@@ -30,7 +30,6 @@ ReporterType = Callable[[curio.Queue, float], Awaitable[None]]
 class SensorServer:
 
     def __init__(self, sensor_db: SensorDB,
-                       polling_interval: float = 0.01,
                        database_write_interval: float = 0.5,
                        broadcast_socket: Optional[str] = '/tmp/brego.sock',
                        websocket_host: Optional[str] = '',
@@ -56,7 +55,6 @@ class SensorServer:
         self.readings = curio.Queue()
         self.sensor_db = sensor_db
 
-        self.polling_interval = polling_interval
         self.database_write_interval = database_write_interval
 
         self.broadcast_socket = broadcast_socket
@@ -64,7 +62,20 @@ class SensorServer:
         self.websocket_port = websocket_port
 
         self.subscribers = set()
+        self.subscriber_names = {}
         self.reporters= set()
+
+    def register_subscriber(self, q: curio.Queue, name: str) -> None:
+        if q not in self.subscribers:
+            self.subscribers.add(q)
+            self.subscriber_names[q] = name
+
+    def unsubscribe(self, q: curio.Queue) -> None:
+        try:
+            self.subscribers.remove(q)
+            del self.subscriber_names[q]
+        except:
+            pass
 
     def register_reporter(self, reporter: ReporterType) -> None:
         """Register a new reporter coroutine. These act as the
@@ -86,10 +97,19 @@ class SensorServer:
         except curio.CancelledError:
             raise
 
+    async def qsize_reporter(self) -> None:
+        try:
+            while True:
+                await curio.sleep(5)
+                sizes = {name: q.qsize() for q, name in self.subscriber_names.items()}
+                print(f'Subscriber queue sizes: {sizes}', file=sys.stderr)
+        except curio.CancelledError:
+            raise
+
     async def database_writer(self) -> None:
         try:
             write_q = curio.Queue()
-            self.subscribers.add(write_q)
+            self.register_subscriber(write_q, 'database_writer')
 
             while True:
                 device, data = await write_q.get()
@@ -99,37 +119,44 @@ class SensorServer:
 
         except curio.CancelledError:
             raise
+        finally:
+            self.unsubscribe(write_q)
 
     async def broadcast_client(self, client: curio.io.Socket, addr: Tuple[str, int]) -> None:
-        print('Unix socket connection from', client.getpeername(), file=sys.stderr)
+        client_name = hash(client) # i guess getpeername() doesn't work with AF_UNIX
+        print(f'Unix socket connection: {client_name}', file=sys.stderr)
 
         stream = client.as_stream()
         bcast_q = curio.Queue()
-        self.subscribers.add(bcast_q)
+        self.register_subscriber(bcast_q, f'broadcast_client:{client_name}')
 
         try:
             while True:
                 device, data = await bcast_q.get()
                 string = json.dumps({'device': device,
                                       'data': data}) + '\n'
-                await stream.write(string.encode('ascii'))
+                await curio.timeout_after(60, stream.write, string.encode('ascii'))
         except curio.CancelledError:
             await stream.write(json.dumps({'msg': 'END_STREAM'}).encode('ascii'))
             raise
-        except BrokenPipeError:
-            print(f'{client.getpeername()} closed connection.', file=sys.stderr)
+        except (BrokenPipeError, curio.TaskTimeout):
+            print(f'Unix socket closed: {client_name}', file=sys.stderr)
+        finally:
+            self.unsubscribe(bcast_q)
 
     async def broadcaster(self) -> None:
         async with curio.SignalQueue(signal.SIGHUP) as restart:
             while True:
                 print('Starting broadcast server.', file=sys.stderr)
-                broadcast_task = await curio.spawn(curio.unix_server, self.broadcast_socket, self.broadcast_client)
+                broadcast_task = await curio.spawn(curio.unix_server,
+                                                   self.broadcast_socket,
+                                                   self.broadcast_client)
                 await restart.get()
                 await broadcast_task.cancel()
 
     async def websocket_client(self, in_q: curio.Queue, out_q: curio.Queue) -> None:
         bcast_q = curio.Queue()
-        self.subscribers.add(bcast_q)
+        self.register_subscriber(bcast_q, f'websocket_client:{hash(in_q)}')
 
         try:
             while True:
@@ -144,12 +171,15 @@ class SensorServer:
                 await out_q.put(strdata)
         except curio.CancelledError:
             raise
+        finally:
+            self.unsubscribe(bcast_q)
 
     async def run(self) -> None:
         async with curio.TaskGroup() as g:
             cancel = curio.SignalEvent(signal.SIGINT, signal.SIGTERM)
 
             await g.spawn(self.dispatcher)
+            await g.spawn(self.qsize_reporter)
             await g.spawn(self.database_writer)
             if self.broadcast_socket is not None:
                 await g.spawn(self.broadcaster)
@@ -160,8 +190,7 @@ class SensorServer:
                               serve_ws(self.websocket_client))
             for reporter in self.reporters:
                 await g.spawn(reporter,
-                              self.readings,
-                              self.polling_interval)
+                              self.readings)
 
             await cancel.wait()
             del cancel
@@ -187,16 +216,16 @@ def run(args):
                           websocket_host=args.websocket_host,
                           websocket_port=args.websocket_port)
     
-    # one-wire temperature senseoers
+    # one-wire temperature sensors
     onewire_devices = [DS18B20Sensor(fn) for fn in find_onewire_devices()]
     onewire_sensors = MultiOneWireSensor(onewire_devices)
     for device in onewire_devices:
         database.add_device(device.device_name, 'temperature')
-    server.register_reporter(multionewire_reporter(onewire_sensors))
+    server.register_reporter(multionewire_reporter(onewire_sensors, .2))
 
     # ADCs
     adc = MCP3008()
     database.add_device('MCP3008-0', 'ADC')
-    server.register_reporter(adc_reporter(adc, 'MCP3008-0'))
+    server.register_reporter(adc_reporter(adc, 'MCP3008-0', .05))
 
     curio.run(server.run, with_monitor=True)
