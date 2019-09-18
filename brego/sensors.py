@@ -13,8 +13,11 @@ Sensor-polling utilities.
 from abc import ABCMeta, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
-from typing import Optional, Iterable, List, Dict, Union, Any, Sequence
+import sys
+import threading
+from typing import Optional, Iterable, List, Dict, Union, Any, Sequence, Tuple
 
+import curio
 import gpiozero
 
 from .utils import notifies, now
@@ -102,7 +105,7 @@ class MultiOneWireSensor:
     def device_names(self) -> List[str]:
         return [d.device_name for d in self.devices]
     
-    def read(self) -> List[Dict[str, Union[str, float, int, bytes]]]:
+    def read(self) -> List[Tuple[float, str, float]]:
         """Poll all devices by spawning futures for each one.
 
         Returns:
@@ -115,8 +118,67 @@ class MultiOneWireSensor:
 
         results = []
         for reading in as_completed(futures):
-            item = (futures[reading], {'time': now(), 'value': reading.result()})
+            item = (now(), futures[reading],  reading.result())
             results.append(item)
 
         return results
 
+    async def reporter(self, readings: curio.Queue) -> None:
+        print(f'Start polling one-wire sensors: {self.device_names}', file=sys.stderr)
+        try:
+            while True:
+                results = await curio.run_in_thread(self.read)
+                await readings.put(results)
+        except:
+            raise
+
+
+class ADCManager:
+
+    def __init__(self, devices:      Sequence[gpiozero.AnalogInputDevice],
+                       device_names: Sequence[str],
+                       block_length: float = 0.1,
+                       max_qsize:    int = 10000):
+        self.devices = devices
+        self.device_names = device_names
+        self.block_length = block_length
+        self.output = curio.UniversalQueue(maxsize=max_qsize)
+        self.running = False
+
+    def worker(self) -> None:
+        print(f'Start polling ADC\'s: {list(self.device_names)}', file=sys.stderr)
+        block = []
+        block_start = now()
+        while self.running:
+            for device, name in zip(self.devices, self.device_names):
+                t = now()
+                if t - block_start >= self.block_length:
+                    self.output.put(list(block))
+                    block = []
+                    block_start = t
+                block.append((t, name, device.value))
+        if block:
+            self.output.put(list(block))
+
+    def start(self) -> None:
+        self.task = threading.Thread(target=self.worker, daemon=True)
+        self.running = True
+        self.task.start()
+
+    def stop(self) -> None:
+        """Stop the polling thread. Will fail is the queue is full.
+        """
+        self.running = False
+        try:
+            self.task.join()
+        except AttributeError:
+            pass
+
+    async def reporter(self, readings: curio.Queue) -> None:
+        try:
+            while True:
+                block = await self.output.get()
+                await readings.put(block)
+        except:
+            # TODO: handle errors or some such
+            raise

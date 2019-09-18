@@ -20,7 +20,7 @@ def main():
     sensors_subparser = subparsers.add_parser('sensors')
     sensors_subparser.set_defaults(func=gpioserver.run)
     sensors_subparser.add_argument('--broadcast-socket', default=gpioserver.DEFAULT_SOCKET)
-    sensors_subparser.add_argument('--report-qsize', action='store_true', default=False)
+    sensors_subparser.add_argument('--report-status', action='store_true', default=False)
     sensors_subparser.add_argument('--write-results', action='store_true', default=False)
 
     http_subparser = subparsers.add_parser('http')

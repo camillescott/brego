@@ -27,14 +27,15 @@ from .ws_server import serve_ws
 # Type definition for sensor-reporter coroutines
 ReporterType = Callable[[curio.Queue, float], Awaitable[None]]
 
+DEFAULT_SOCKET = '/tmp/brego.gpio.sock'
+
 class SensorServer:
 
     def __init__(self, sensor_db: SensorDB,
+                       broadcast_socket: str = DEFAULT_SOCKET,
                        database_write_interval: float = 0.5,
-                       broadcast_socket: Optional[str] = '/tmp/brego.sock',
-                       websocket_host: Optional[str] = '',
-                       websocket_port: int = 6565,
-                       report_qsize: bool = False):
+                       write_results: bool = False,
+                       report_status: bool = False):
         """
 
         Args:
@@ -56,17 +57,16 @@ class SensorServer:
         self.readings = curio.Queue()
         self.sensor_db = sensor_db
 
+        self.write_results = write_results
         self.database_write_interval = database_write_interval
 
         self.broadcast_socket = broadcast_socket
-        self.websocket_host = websocket_host
-        self.websocket_port = websocket_port
 
         self.subscribers = set()
         self.subscriber_names = {}
         self.reporters= set()
 
-        self.report_qsize = report_qsize
+        self.report_status = report_status
 
     def register_subscriber(self, q: curio.Queue, name: str) -> None:
         if q not in self.subscribers:
@@ -100,7 +100,7 @@ class SensorServer:
         except curio.CancelledError:
             raise
 
-    async def qsize_reporter(self) -> None:
+    async def status_reporter(self) -> None:
         try:
             while True:
                 await curio.sleep(5)
@@ -115,9 +115,8 @@ class SensorServer:
             self.register_subscriber(write_q, 'database_writer')
 
             while True:
-                device, data = await write_q.get()
-
-                self.sensor_db.insert_readings(device, [data])
+                block = await write_q.get()
+                self.sensor_db.insert_readings(block)
                 await write_q.task_done()
 
         except curio.CancelledError:
@@ -132,15 +131,23 @@ class SensorServer:
         stream = client.as_stream()
         bcast_q = curio.Queue()
         self.register_subscriber(bcast_q, f'broadcast_client:{client_name}')
-
+        n_readings = 0
+        last_report = now()
         try:
             while True:
-                device, data = await bcast_q.get()
-                string = json.dumps({'device': device,
-                                      'data': data}) + '\n'
+                block = await bcast_q.get()
+
+                n_readings += len(block)
+                delta = block[-1][0] - last_report
+                if(delta >= 5.0):
+                    print(f'Broadcasting {n_readings / delta} readings/second.', file=sys.stderr)
+                    last_report = now()
+                    n_readings = 0
+
+                string = json.dumps(block) + '\n'
                 await curio.timeout_after(60, stream.write, string.encode('ascii'))
         except curio.CancelledError:
-            await stream.write(json.dumps({'msg': 'END_STREAM'}).encode('ascii'))
+            await stream.write(json.dumps([(0, 'END_STREAM', -1)]).encode('ascii'))
             raise
         except (BrokenPipeError, curio.TaskTimeout):
             print(f'Unix socket closed: {client_name}', file=sys.stderr)
@@ -150,48 +157,28 @@ class SensorServer:
     async def broadcaster(self) -> None:
         async with curio.SignalQueue(signal.SIGHUP) as restart:
             while True:
-                print('Starting broadcast server.', file=sys.stderr)
+                print(f'Starting broadcast server on {self.broadcast_socket}.', file=sys.stderr)
                 broadcast_task = await curio.spawn(curio.unix_server,
                                                    self.broadcast_socket,
                                                    self.broadcast_client)
                 await restart.get()
                 await broadcast_task.cancel()
 
-    async def websocket_client(self, in_q: curio.Queue, out_q: curio.Queue) -> None:
-        bcast_q = curio.Queue()
-        self.register_subscriber(bcast_q, f'websocket_client:{hash(in_q)}')
-
-        try:
-            while True:
-                if not in_q.empty():
-                    msg = await in_q.get()
-                    if msg is None:
-                        break
-
-                device, data = await bcast_q.get()
-                strdata = json.dumps({'device': device,
-                                      'data': data}) + '\n'
-                await out_q.put(strdata)
-        except curio.CancelledError:
-            raise
-        finally:
-            self.unsubscribe(bcast_q)
 
     async def run(self) -> None:
         async with curio.TaskGroup() as g:
             cancel = curio.SignalEvent(signal.SIGINT, signal.SIGTERM)
 
             await g.spawn(self.dispatcher)
-            if self.report_qsize:
-                await g.spawn(self.qsize_reporter)
-            await g.spawn(self.database_writer)
-            if self.broadcast_socket is not None:
-                await g.spawn(self.broadcaster)
-            if self.websocket_host is not None:
-                await g.spawn(curio.tcp_server,
-                              self.websocket_host,
-                              self.websocket_port,
-                              serve_ws(self.websocket_client))
+
+            if self.report_status:
+                await g.spawn(self.status_reporter)
+
+            if self.write_results:
+                await g.spawn(self.database_writer)
+
+            await g.spawn(self.broadcaster)
+
             for reporter in self.reporters:
                 await g.spawn(reporter,
                               self.readings)
@@ -209,31 +196,30 @@ def run(args):
     from gpiozero import MCP3008
 
     from brego.database import SensorDB
-    from brego.reporters import (adc_reporter, multionewire_reporter)
     from brego.sensors import (find_onewire_devices,
                                MultiOneWireSensor,
-                               DS18B20Sensor)
+                               DS18B20Sensor,
+                               ADCManager)
 
     database = SensorDB.request_instance()
     server = SensorServer(database,
                           broadcast_socket=args.broadcast_socket,
-                          websocket_host=args.websocket_host,
-                          websocket_port=args.websocket_port)
+                          report_status=args.report_status)
     
     # one-wire temperature sensors
     onewire_devices = [DS18B20Sensor(fn) for fn in find_onewire_devices()]
     onewire_sensors = MultiOneWireSensor(onewire_devices)
     for device in onewire_devices:
         database.add_device(device.device_name, 'temperature')
-    server.register_reporter(multionewire_reporter(onewire_sensors, .2))
+    server.register_reporter(onewire_sensors.reporter)
 
     # ADCs
-    adc = MCP3008()
-    database.add_device('MCP3008-0', 'ADC')
-    server.register_reporter(adc_reporter(adc, 'MCP3008-0', .05))
-
-    tach = MCP3008(channel=7, max_voltage=5.0)
-    database.add_device('Tachometer', 'ADC')
-    server.register_reporter(adc_reporter(tach, 'Tachometer', .001))
+    adc_devices = [MCP3008(channel=0), MCP3008(channel=7)]
+    adc_names   = ['Potentiometer', 'Tachometer']
+    for name in adc_names:
+        database.add_device(name, 'ADC')
+    adc_manager = ADCManager(adc_devices, adc_names)
+    adc_manager.start()
+    server.register_reporter(adc_manager.reporter)
 
     curio.run(server.run, with_monitor=True)
