@@ -33,7 +33,8 @@ class SensorServer:
                        database_write_interval: float = 0.5,
                        broadcast_socket: Optional[str] = '/tmp/brego.sock',
                        websocket_host: Optional[str] = '',
-                       websocket_port: int = 6565):
+                       websocket_port: int = 6565,
+                       report_qsize: bool = False):
         """
 
         Args:
@@ -64,6 +65,8 @@ class SensorServer:
         self.subscribers = set()
         self.subscriber_names = {}
         self.reporters= set()
+
+        self.report_qsize = report_qsize
 
     def register_subscriber(self, q: curio.Queue, name: str) -> None:
         if q not in self.subscribers:
@@ -179,7 +182,8 @@ class SensorServer:
             cancel = curio.SignalEvent(signal.SIGINT, signal.SIGTERM)
 
             await g.spawn(self.dispatcher)
-            await g.spawn(self.qsize_reporter)
+            if self.report_qsize:
+                await g.spawn(self.qsize_reporter)
             await g.spawn(self.database_writer)
             if self.broadcast_socket is not None:
                 await g.spawn(self.broadcaster)
@@ -227,5 +231,9 @@ def run(args):
     adc = MCP3008()
     database.add_device('MCP3008-0', 'ADC')
     server.register_reporter(adc_reporter(adc, 'MCP3008-0', .05))
+
+    tach = MCP3008(channel=7, max_voltage=5.0)
+    database.add_device('Tachometer', 'ADC')
+    server.register_reporter(adc_reporter(tach, 'Tachometer', .001))
 
     curio.run(server.run, with_monitor=True)
