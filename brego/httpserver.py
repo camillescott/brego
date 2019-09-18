@@ -40,10 +40,14 @@ def websocket_sensor_stream_route(app, socket_path):
         try:
             while True:
                 data = await reader.readline()
-                data = data.decode('utf-8')
-                parsed = json.loads(data)
-                if parsed['device'] == device or device == 'all':
-                    await socket.send(data)
+                if device == 'all':
+                    await socket.send(data.decode('utf-8'))
+                else:
+                    parsed = json.loads(data, encoding='utf-8')
+                    filtered = [(t, _device, val) for t, _device, val in parsed
+                                if _device == device]
+                    await socket.send(json.dumps(filtered))
+
         except asyncio.CancelledError as e:
             print(f'Websocket closed: {request.socket}', file=sys.stderr)
             writer.close()
