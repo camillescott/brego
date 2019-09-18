@@ -1,127 +1,101 @@
-var temperature_spec = {
-  $schema: 'https://vega.github.io/schema/vega-lite/v4.json',
-  data: {name: 'table'},
-  width: 500,
-  mark: 'line',
-  encoding: {
-      x: {field: 'time', type: 'quantitative', scale: {zero: false}},
-    y: {field: 'value', type: 'quantitative'},
-    color: {field: 'sensor', type: 'nominal', legend: null}
-  }
-};
-
-var adc_spec = {
-    $schema: 'https://vega.github.io/schema/vega-lite/v4.json',
-    data: {name: 'table'},
-//    width: 500,
-    autosize: {
-	  type: "fit",
-	  resize: true,
-	},
-    mark: {
-        type: 'line',
-        strokeWidth: 3,
-        clip: true
-    },
-    encoding: {
-        x: {
-            field: 'time', 
-            type: 'quantitative', 
-            scale: {zero: false}
-        },
-        y: {
-            field: 'value', 
-            type: 'quantitative',
-            scale: {domain: [0.0, 1.0]}
-        },
-        color: {field: 'sensor', type: 'nominal', legend: null}
-    }
-};
-
-
-var start_time = new Date().getTime() / 1000.0;
+var start_time = new Date().getTime()
 
 function parseData(data) {
-    var d = JSON.parse(event.data);
-    var data = {}
-    data['time'] = d.data.time - start_time;
-    data['sensor'] = d.device;
-    data['value'] = d.data.value;
-
+    var raw = JSON.parse(event.data);
+    var data = raw.map(function(reading) {
+        entry = {'time': new Date(reading[0] * 1000)}
+        entry[reading[1]] = reading[2];
+        return entry;
+    });
+    
     return data;
 }
 
+function getContainerSize(elem_name) {
+    var size = {};
+    var container = document.getElementById(elem_name);
+    size['width'] = container.clientWidth;
+    size['height'] = container.clientHeight * 0.95;
+    return size;
+}
+
+
+function adc_chart(elem_name) {
+    var data = [];
+    var size = getContainerSize('ADC');
+    var chart = realTimeLineChart(0.0, 1.0, ['Potentiometer'])
+                .width(size.width);
+
+    const socket = new WebSocket('ws://{{ request.host }}/sensors/stream/Potentiometer');
+
+
+    function resize() {
+        if (d3.select(elem__name + " svg").empty()) {
+            return;
+        }
+        chart.width(+d3.select(elem_name).style("width").replace(/(px)/g, ""));
+        d3.select(elem_name).call(chart);
+    }
+
+    socket.onmessage = function(event) {
+        var parsed = parseData(event.data)
+        parsed.forEach(function(reading) {
+            data.push(reading);
+            if(reading.time - data[0]['time'] > 5000) {
+                data.shift();
+            }
+        });
+        console.log(data);
+
+        d3.select(elem_name).datum(data).call(chart);
+    }
+
+    document.addEventListener("DOMContentLoaded", function() {
+        d3.select(elem_name).datum(data).call(chart);
+        d3.select(window).on('resize', resize);
+    });
+}
+
+
+function temps_chart(elem_name) {
+    var data = [];
+    var size = getContainerSize('temperatures');
+    var chart = realTimeLineChart(0.0, 50.0, ['value'])
+                .width(size.width);
+
+    const socket = new WebSocket('ws://{{ request.host }}/sensors/stream/Potentiometer');
+
+
+    function resize() {
+        if (d3.select(elem__name + " svg").empty()) {
+            return;
+        }
+        chart.width(+d3.select(elem_name).style("width").replace(/(px)/g, ""));
+        d3.select(elem_name).call(chart);
+    }
+
+    socket.onmessage = function(event) {
+        var msg = parseData(event.data)
+        data.push(msg);
+
+        if(msg['time'] - data[0]['time'] > 60000.0) {
+            data.shift();
+        }
+
+        d3.select(elem_name).datum(data).call(chart);
+    }
+
+    document.addEventListener("DOMContentLoaded", function() {
+        d3.select(elem_name).datum(data).call(chart);
+        d3.select(window).on('resize', resize);
+    });
+}
+
+
+adc_chart('#ADC');
+//temps_chart('#temperatures');
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-
-async function main() {
-
-    vegaEmbed('#ADC',
-              adc_spec,
-              {theme: 'vox',
-               renderer: 'svg',
-               actions: false}).then(async function(result) {
-        view = result.view;
-        const socket = new WebSocket('ws://{{ request.host }}/sensors/stream/MCP3008-0');
-
-        socket.onmessage = function(event) {
-            var data = parseData(event.data)
-            var changeSet = vega
-              .changeset()
-              .insert(data)
-              .remove(function(t) {
-                return t.time < data.time - 30.0;
-              });
-            var div = document.getElementById('adc-card');
-            view.width(div.clientWidth * 0.9).runAsync();
-            view.change('table', changeSet).runAsync();
-        }
-    });
-}
-
-main();
-
-/*
-vegaEmbed('#temperatures', temperature_spec).then(function(result) {
-    temps_view = result.view;
-
-    vegaEmbed('#adcs', adc_spec).then(function(result2) {
-        adcs_view = result2.view;
-
-        socket.onopen = function(event) {
-
-            socket.onmessage = function(event) {
-                var d = JSON.parse(event.data);
-                var device = d.device;
-                var data = d.data;
-                console.log(d);
-                data['time'] = data.time - start_time;
-
-
-
-                if (device == 'MCP3008-0') {
-                    var changeSet = vega
-                      .changeset()
-                      .insert({'time': data.time, 'value': data.value, 'sensor': device})
-                      .remove(function(t) {
-                        return t.time < data.time - 30.0;
-                      });
-                    adcs_view.change('table', changeSet).runAsync();
-                } else {
-                    var changeSet = vega
-                      .changeset()
-                      .insert({'time': data.time, 'value': data.value, 'sensor': device})
-                      .remove(function(t) {
-                        return t.time < data.time - 30.0;
-                      });
-                    temps_view.change('table', changeSet).runAsync();
-                }
-            }
-        }
-    });
-});
-
-*/
