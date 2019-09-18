@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
 import sys
 import threading
+import time
 from typing import Optional, Iterable, List, Dict, Union, Any, Sequence, Tuple
 
 import curio
@@ -138,10 +139,12 @@ class ADCManager:
     def __init__(self, devices:      Sequence[gpiozero.AnalogInputDevice],
                        device_names: Sequence[str],
                        block_length: float = 0.1,
+                       tick:         float = 0.01,
                        max_qsize:    int = 10000):
         self.devices = devices
         self.device_names = device_names
         self.block_length = block_length
+        self.tick = tick
         self.output = curio.UniversalQueue(maxsize=max_qsize)
         self.running = False
 
@@ -157,6 +160,7 @@ class ADCManager:
                     block = []
                     block_start = t
                 block.append((t, name, device.value))
+            time.sleep(self.tick)
         if block:
             self.output.put(list(block))
 
